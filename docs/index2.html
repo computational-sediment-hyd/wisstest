@@ -71,11 +71,6 @@
   <script>
   'use strict';
 
-  // CORSプロキシ (corsproxy.io が応答しない場合は allorigins にフォールバック)
-  const PROXIES = [
-    url => 'https://corsproxy.io/?' + encodeURIComponent(url),
-    url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-  ];
 
   let gCsvRows = [];
   let gFilename = '';
@@ -99,7 +94,7 @@
       renderResult(gCsvRows, stationid, kind, startTime);
       showStatus('', '');
     } catch (err) {
-      showStatus('error', `エラー: ${err.message}`);
+      showStatus('error', 'エラー: ' + err.message);
     }
   });
 
@@ -133,9 +128,8 @@
 
     const target = `http://www1.river.go.jp/cgi-bin/${DSP}?KIND=${ikind}&ID=${stationid}&BGNDATE=${strtime}&ENDDATE=21001231&KAWABOU=NO`;
 
-    // プロキシ経由でフェッチ
-    const buf = await fetchViaProxy(target);
-    const html = decodeHtml(buf);
+    // プロキシ経由でフェッチ (文字列として返る)
+    const html = await fetchHtml(target);
 
     // HTMLパース → 2番目のtableを取得
     const doc    = new DOMParser().parseFromString(html, 'text/html');
@@ -164,25 +158,43 @@
     return csvRows;
   }
 
-  async function fetchViaProxy(target) {
-    let lastErr;
-    for (const proxyFn of PROXIES) {
-      try {
-        const res = await fetch(proxyFn(target));
-        if (res.ok) return await res.arrayBuffer();
-        lastErr = new Error(`HTTP ${res.status}`);
-      } catch (e) {
-        lastErr = e;
+  async function fetchHtml(target) {
+    const errors = [];
+
+    // Proxy 1: allorigins.win — JSON API、サーバ側で文字コード変換済み
+    try {
+      const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(target));
+      if (r.ok) {
+        const data = await r.json();
+        if (data.contents && data.contents.length > 100) return data.contents;
+        errors.push('allorigins: レスポンスが空');
+      } else {
+        errors.push(`allorigins: HTTP ${r.status}`);
       }
-    }
-    throw new Error(`データ取得失敗: ${lastErr?.message}`);
+    } catch (e) { errors.push('allorigins: ' + e.message); }
+
+    // Proxy 2: corsproxy.io — URLはエンコードせずそのまま渡す
+    try {
+      const r = await fetch('https://corsproxy.io/?' + target);
+      if (r.ok) {
+        const buf = await r.arrayBuffer();
+        return decodeBuffer(buf);
+      }
+      errors.push(`corsproxy.io: HTTP ${r.status}`);
+    } catch (e) { errors.push('corsproxy.io: ' + e.message); }
+
+    // ローカルファイルから開いている場合は専用メッセージ
+    const hint = location.protocol === 'file:'
+      ? 'ローカルファイルとして開いているためCORSエラーが発生します。<br>' +
+        '<b>npx http-server</b> 等でローカルサーバを起動するか、GitHub Pagesに公開してください。'
+      : 'CORSプロキシへのアクセスに失敗しました。しばらくして再試行してください。';
+    throw new Error(hint + '<br><small class="text-muted">詳細: ' + errors.join(' / ') + '</small>');
   }
 
-  function decodeHtml(buf) {
-    // Content-Type ヘッダや HTML meta から文字コードを推定
+  function decodeBuffer(buf) {
     const peek    = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buf, 0, 2048));
     const matched = peek.match(/charset=["']?([^"'\s;>]+)/i);
-    const charset = matched ? matched[1] : 'shift-jis'; // 日本の行政サイトはshift-jisが多い
+    const charset = matched ? matched[1] : 'shift-jis';
     try {
       return new TextDecoder(charset, { fatal: true }).decode(buf);
     } catch {
@@ -221,7 +233,7 @@
         <div class="spinner-border spinner-border-sm" role="status"></div>
         <span>${msg}</span></div>`;
     } else {
-      el.innerHTML = `<div class="alert alert-danger mb-4">${msg}</div>`;
+      el.innerHTML = `<div class="alert alert-danger mb-4" style="white-space:pre-line">${msg}</div>`;
     }
   }
   </script>
